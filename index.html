@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>燃料ラン！</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; background:#1a2233; font-family:'Hiragino Maru Gothic ProN','Hiragino Sans',sans-serif; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #wrap { position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; background:#87b5e0; border-radius:8px; }
+  #muteBtn { position:absolute; top:10px; right:10px; z-index:5; background:rgba(255,255,255,.85); border:none; border-radius:999px; width:42px; height:42px; font-size:20px; cursor:pointer; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+  <button id="muteBtn" title="音 ON/OFF">🔊</button>
+</div>
+<script>
+'use strict';
+// ===== 燃料ラン！ =====
+// 後ろ姿視点の疑似3Dドライブ。オートアクセル、左右移動のみ。
+// 燃料缶 ⛽ を拾って燃料を保ち、走行距離を競う。
+const W = 420, H = 640;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+function fit() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  cv.width = W; cv.height = H;
+  cv.style.width = (W * s) + 'px'; cv.style.height = (H * s) + 'px';
+}
+window.addEventListener('resize', fit); fit();
+
+// 透視：t=0 地平線 / t=1 手前
+const HORIZON = 190;
+function projY(t) { return HORIZON + t * (H - HORIZON); }
+function roadHalf(t) { return 26 + t * (190 - 26); }   // 道路の半幅(px)
+function objScale(t) { return 0.12 + t * t * 1.15; }
+
+// ===== 音（WebAudio シンセ） =====
+let actx = null, muted = false;
+function beep(freq, dur, type, vol, when) {
+  if (muted) return;
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+    const t0 = actx.currentTime + (when || 0);
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type || 'square'; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol || 0.06, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t0); o.stop(t0 + dur);
+  } catch (e) { /* 音が出ない環境では無視 */ }
+}
+const sndPickup = () => { beep(880, .09, 'square', .07); beep(1320, .14, 'square', .07, .08); };
+const sndWarn   = () => beep(220, .12, 'sawtooth', .05);
+const sndOver   = () => { beep(392, .18, 'triangle', .08); beep(330, .18, 'triangle', .08, .18); beep(262, .34, 'triangle', .08, .36); };
+const sndStart  = () => { beep(523, .1, 'square', .06); beep(659, .1, 'square', .06, .1); beep(784, .16, 'square', .06, .2); };
+document.getElementById('muteBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  muted = !muted;
+  e.target.textContent = muted ? '🔇' : '🔊';
+});
+
+// ===== ゲーム状態 =====
+let state = 'title';            // title | play | over
+let px = 0, pTarget = 0;        // プレイヤーの道路内位置 -1..1
+let speedKmh = 0;               // 表示速度
+let dist = 0;                   // 走行距離 m
+let fuel = 100;
+let fuels = [];                 // {t, lane}
+let spawnTimer = 0, warnTimer = 0, elapsed = 0;
+let best = parseInt(localStorage.getItem('fuelrun_best') || '0', 10);
+let keys = { left: false, right: false };
+let steerDrag = null;           // タッチ中の x (canvas座標)
+
+function reset() {
+  px = 0; pTarget = 0; speedKmh = 60; dist = 0; fuel = 100;
+  fuels = []; spawnTimer = 0.6; warnTimer = 0; elapsed = 0;
+}
+
+function startGame() { reset(); state = 'play'; sndStart(); }
+
+// ===== 入力 =====
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
+  if (e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
+  if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') startGame();
+  if (e.key.startsWith('Arrow')) e.preventDefault();
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+  if (e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+});
+function canvasX(clientX) {
+  const r = cv.getBoundingClientRect();
+  return (clientX - r.left) / r.width * W;
+}
+cv.addEventListener('pointerdown', (e) => {
+  if (state !== 'play') { startGame(); return; }
+  steerDrag = canvasX(e.clientX);
+});
+cv.addEventListener('pointermove', (e) => { if (steerDrag !== null) steerDrag = canvasX(e.clientX); });
+window.addEventListener('pointerup', () => { steerDrag = null; });
+window.addEventListener('pointercancel', () => { steerDrag = null; });
+
+// ===== 更新 =====
+function update(dt) {
+  if (state !== 'play') return;
+  elapsed += dt;
+  // オートアクセル：徐々に加速（上限 210km/h）
+  speedKmh = Math.min(210, speedKmh + dt * 4.5);
+  const v = speedKmh / 3.6;                     // m/s
+  dist += v * dt;
+  // 燃料消費（速度に比例）。缶1個で約10秒ぶん
+  fuel -= dt * (1.8 + speedKmh / 210 * 0.9);
+  // ステアリング
+  const steerSpeed = 2.6;
+  if (keys.left) pTarget -= steerSpeed * dt;
+  if (keys.right) pTarget += steerSpeed * dt;
+  if (steerDrag !== null) {
+    // ドラッグ位置を道路内位置へ（プレイヤー高さでの道路幅で換算）
+    const cx = W / 2, half = roadHalf(0.92);
+    pTarget = Math.max(-1.05, Math.min(1.05, (steerDrag - cx) / half));
+  }
+  pTarget = Math.max(-1.05, Math.min(1.05, pTarget));
+  px += (pTarget - px) * Math.min(1, dt * 10);
+  // 燃料缶の出現と移動
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    fuels.push({ t: 0, lane: (Math.random() * 1.7 - 0.85) });
+    spawnTimer = 2.4 + Math.random() * 1.2;
+  }
+  const tSpeed = 0.16 + (speedKmh / 210) * 0.30;  // 迫ってくる速さ
+  for (const f of fuels) f.t += dt * tSpeed * (0.35 + f.t * 1.5);
+  // 取得判定（プレイヤーは t≈0.92 の高さ）
+  fuels = fuels.filter((f) => {
+    if (f.t > 1.05) return false;
+    if (f.t > 0.84 && f.t < 1.0 && Math.abs(f.lane - px) < 0.34) {
+      fuel = Math.min(100, fuel + 25);
+      sndPickup();
+      return false;
+    }
+    return true;
+  });
+  // 燃料警告
+  if (fuel < 25) { warnTimer -= dt; if (warnTimer <= 0) { sndWarn(); warnTimer = 1.0; } }
+  if (fuel <= 0) {
+    fuel = 0; state = 'over'; sndOver();
+    const d = Math.floor(dist);
+    if (d > best) { best = d; localStorage.setItem('fuelrun_best', String(best)); }
+  }
+}
+
+// ===== 描画 =====
+function drawRoad() {
+  // 空と遠景
+  const sky = ctx.createLinearGradient(0, 0, 0, HORIZON);
+  sky.addColorStop(0, '#6fa8dc'); sky.addColorStop(1, '#cfe8f7');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, HORIZON);
+  ctx.fillStyle = '#f7d774';
+  ctx.beginPath(); ctx.arc(W - 66, 52, 24, 0, Math.PI * 2); ctx.fill();   // 太陽
+  ctx.fillStyle = '#7fae6e';
+  ctx.beginPath();                                                        // 丘
+  ctx.moveTo(0, HORIZON); ctx.quadraticCurveTo(90, HORIZON - 52, 210, HORIZON);
+  ctx.quadraticCurveTo(320, HORIZON - 40, W, HORIZON); ctx.closePath(); ctx.fill();
+  // 地面
+  ctx.fillStyle = '#8fbf6f'; ctx.fillRect(0, HORIZON, W, H - HORIZON);
+  // 道路（台形）
+  const cx = W / 2;
+  ctx.fillStyle = '#5b5f66';
+  ctx.beginPath();
+  ctx.moveTo(cx - roadHalf(0), HORIZON); ctx.lineTo(cx + roadHalf(0), HORIZON);
+  ctx.lineTo(cx + roadHalf(1), H); ctx.lineTo(cx - roadHalf(1), H);
+  ctx.closePath(); ctx.fill();
+  // 縁石（流れるストライプ）
+  const stripeN = 7;
+  const off = (dist * 0.045) % 1;
+  for (let i = 0; i < stripeN; i++) {
+    let t = (i + off) / stripeN; if (t > 1) t -= 1;
+    const t2 = Math.min(1, t + 0.055);
+    for (const side of [-1, 1]) {
+      ctx.fillStyle = (i % 2 === 0) ? '#e8e8e8' : '#d84a4a';
+      ctx.beginPath();
+      ctx.moveTo(cx + side * roadHalf(t), projY(t));
+      ctx.lineTo(cx + side * roadHalf(t2), projY(t2));
+      ctx.lineTo(cx + side * (roadHalf(t2) + 5 + t2 * 9), projY(t2));
+      ctx.lineTo(cx + side * (roadHalf(t) + 5 + t * 9), projY(t));
+      ctx.closePath(); ctx.fill();
+    }
+    // 中央線
+    if (i % 2 === 0) {
+      ctx.fillStyle = '#f5f0c8';
+      const w1 = 1.5 + t * 5, w2 = 1.5 + t2 * 5;
+      ctx.beginPath();
+      ctx.moveTo(cx - w1 / 2, projY(t)); ctx.lineTo(cx + w1 / 2, projY(t));
+      ctx.lineTo(cx + w2 / 2, projY(t2)); ctx.lineTo(cx - w2 / 2, projY(t2));
+      ctx.closePath(); ctx.fill();
+    }
+  }
+}
+
+function drawFuelCan(f) {
+  const cx = W / 2;
+  const x = cx + f.lane * roadHalf(f.t);
+  const y = projY(f.t);
+  const s = objScale(f.t);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.font = '44px serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  ctx.fillText('⛽', 0, 4);
+  ctx.restore();
+}
+
+function drawPlayer() {
+  const cx = W / 2;
+  const py = projY(0.92);
+  const x = cx + px * roadHalf(0.92);
+  ctx.save();
+  ctx.translate(x, py);
+  // 影
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.beginPath(); ctx.ellipse(0, 16, 56, 10, 0, 0, Math.PI * 2); ctx.fill();
+  // タイヤ（後輪）
+  ctx.fillStyle = '#222';
+  roundRect(-58, -6, 20, 26, 6); ctx.fill();
+  roundRect(38, -6, 20, 26, 6); ctx.fill();
+  // 車体（後ろ姿）
+  const bodyGrad = ctx.createLinearGradient(0, -62, 0, 18);
+  bodyGrad.addColorStop(0, '#e2483d'); bodyGrad.addColorStop(1, '#b02a20');
+  ctx.fillStyle = bodyGrad;
+  roundRect(-52, -58, 104, 76, 16); ctx.fill();
+  // リアウィンドウ
+  ctx.fillStyle = '#2c3e50';
+  roundRect(-38, -52, 76, 30, 10); ctx.fill();
+  // 運転手の頭（ヘルメット）＝後ろ姿の主役
+  ctx.fillStyle = '#f5f5f5';
+  ctx.beginPath(); ctx.arc(0, -38, 15, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#e2483d';
+  ctx.beginPath(); ctx.arc(0, -41, 15, Math.PI, Math.PI * 2); ctx.fill();
+  ctx.fillRect(-15, -43, 30, 4);
+  // テールランプ
+  ctx.fillStyle = '#ffd23e';
+  roundRect(-48, -12, 20, 9, 4); ctx.fill();
+  roundRect(28, -12, 20, 9, 4); ctx.fill();
+  // ナンバー
+  ctx.fillStyle = '#fff';
+  roundRect(-16, -14, 32, 15, 3); ctx.fill();
+  ctx.fillStyle = '#333'; ctx.font = 'bold 10px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('58-39', 0, -6);
+  ctx.restore();
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawHUD() {
+  // 距離
+  ctx.fillStyle = 'rgba(0,0,0,.45)';
+  roundRect(10, 10, 168, 56, 10); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillText((dist / 1000).toFixed(2) + ' km', 20, 36);
+  ctx.font = '12px sans-serif'; ctx.fillStyle = '#cfe3ff';
+  ctx.fillText('ベスト ' + (best / 1000).toFixed(2) + ' km', 20, 56);
+  // 速度
+  ctx.fillStyle = 'rgba(0,0,0,.45)';
+  roundRect(W - 118, 10, 108, 56, 10); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillText(Math.round(speedKmh) + '', W - 44, 38);
+  ctx.font = '12px sans-serif'; ctx.fillStyle = '#cfe3ff';
+  ctx.fillText('km/h', W - 16, 38);
+  ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillText('オート加速中', W - 16, 56);
+  // 燃料ゲージ
+  const gw = W - 40;
+  ctx.fillStyle = 'rgba(0,0,0,.45)';
+  roundRect(10, H - 44, gw + 20, 34, 10); ctx.fill();
+  ctx.font = '15px serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('⛽', 18, H - 26);
+  const fw = gw - 26;
+  ctx.fillStyle = '#3a3f46'; roundRect(42, H - 35, fw, 16, 8); ctx.fill();
+  ctx.fillStyle = fuel < 25 ? '#e2483d' : '#ffd23e';
+  if (fuel > 0.5) { roundRect(42, H - 35, fw * fuel / 100, 16, 8); ctx.fill(); }
+}
+
+function drawTitle() {
+  drawRoad();
+  ctx.fillStyle = 'rgba(20,28,44,.55)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.font = 'bold 52px sans-serif';
+  ctx.fillText('燃料ラン！', W / 2, 190);
+  ctx.font = '40px serif'; ctx.fillText('⛽', W / 2, 248);
+  ctx.font = '16px sans-serif';
+  ctx.fillText('基本オートアクセル。左右に動くだけ！', W / 2, 300);
+  ctx.fillText('落ちてる ⛽ を拾って燃料を保ち、', W / 2, 328);
+  ctx.fillText('どこまで走れるか競おう', W / 2, 354);
+  ctx.font = '14px sans-serif'; ctx.fillStyle = '#cfe3ff';
+  ctx.fillText('操作：←→キー ／ 画面ドラッグ', W / 2, 396);
+  if (best > 0) { ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 17px sans-serif'; ctx.fillText('自己ベスト ' + (best / 1000).toFixed(2) + ' km', W / 2, 430); }
+  ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 22px sans-serif';
+  ctx.fillText('タップ / スペースでスタート', W / 2, 500);
+}
+
+function drawOver() {
+  drawRoad();
+  drawPlayer();
+  ctx.fillStyle = 'rgba(20,28,44,.62)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.font = 'bold 38px sans-serif';
+  ctx.fillText('ガス欠…！', W / 2, 210);
+  ctx.font = '16px sans-serif';
+  ctx.fillText('記録', W / 2, 268);
+  ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 48px sans-serif';
+  ctx.fillText((Math.floor(dist) / 1000).toFixed(2) + ' km', W / 2, 322);
+  ctx.fillStyle = '#fff'; ctx.font = '16px sans-serif';
+  ctx.fillText('自己ベスト ' + (best / 1000).toFixed(2) + ' km', W / 2, 362);
+  if (Math.floor(dist) >= best && best > 0) {
+    ctx.fillStyle = '#7ee787'; ctx.font = 'bold 18px sans-serif';
+    ctx.fillText('🎉 ベスト更新！', W / 2, 394);
+  }
+  ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('タップ / スペースでもう一回', W / 2, 470);
+}
+
+function draw() {
+  if (state === 'title') { drawTitle(); return; }
+  drawRoad();
+  // 遠い順に描く
+  [...fuels].sort((a, b) => a.t - b.t).forEach(drawFuelCan);
+  drawPlayer();
+  drawHUD();
+  if (state === 'over') drawOver();
+}
+
+// ===== メインループ =====
+let lastTs = 0;
+function loop(ts) {
+  const dt = Math.min(0.05, (ts - lastTs) / 1000 || 0);
+  lastTs = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
