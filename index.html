@@ -4,18 +4,49 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>燃料ラン！</title>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html, body { height:100%; background:#1a2233; font-family:'Hiragino Maru Gothic ProN','Hiragino Sans',sans-serif; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; overscroll-behavior:none; }
   #wrap { position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center; }
   canvas { display:block; background:#87b5e0; border-radius:8px; touch-action:none; -webkit-touch-callout:none; }
   #muteBtn { position:absolute; top:10px; right:10px; z-index:5; background:rgba(255,255,255,.85); border:none; border-radius:999px; width:42px; height:42px; font-size:20px; cursor:pointer; }
+  #rankBtn { position:absolute; top:10px; left:10px; z-index:5; background:rgba(255,255,255,.85); border:none; border-radius:999px; width:42px; height:42px; font-size:20px; cursor:pointer; }
+  #rankPanel { position:fixed; inset:0; z-index:20; background:rgba(10,15,26,.6); display:flex; align-items:center; justify-content:center; }
+  #rankPanel.hidden { display:none; }
+  .rankCard { width:min(88vw,380px); max-height:86vh; overflow-y:auto; background:#1d2942; color:#fff; border-radius:16px; padding:18px 18px 14px; box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  .rankTitle { font-weight:bold; font-size:17px; text-align:center; margin-bottom:8px; }
+  #rankStatus { font-size:13px; color:#cfe3ff; text-align:center; min-height:18px; margin-bottom:6px; }
+  #rankNameRow { display:flex; gap:8px; margin-bottom:10px; }
+  #rankNameRow.hidden { display:none; }
+  #rankName { flex:1; min-width:0; font-size:15px; padding:8px 10px; border-radius:10px; border:none; }
+  #rankSubmit { background:#ffd23e; color:#5b4300; font-weight:bold; border:none; border-radius:10px; padding:8px 14px; font-size:15px; cursor:pointer; }
+  #rankList table { width:100%; border-collapse:collapse; font-size:14px; }
+  #rankList td { padding:4px 6px; border-bottom:1px solid rgba(255,255,255,.12); }
+  #rankList td.n { text-align:right; font-variant-numeric:tabular-nums; }
+  #rankList tr.me td { background:rgba(255,210,62,.28); font-weight:bold; }
+  #rankList .rankMsg { font-size:14px; color:#9fb4d8; text-align:center; padding:10px 0; }
+  #rankClose { display:block; margin:12px auto 2px; background:rgba(255,255,255,.9); color:#1d2942; font-weight:bold; border:none; border-radius:999px; padding:9px 26px; font-size:15px; cursor:pointer; }
 </style>
 </head>
 <body>
 <div id="wrap">
   <canvas id="cv"></canvas>
   <button id="muteBtn" title="音 ON/OFF">🔊</button>
+  <button id="rankBtn" title="ランキング">🏆</button>
+  <div id="rankPanel" class="hidden">
+    <div class="rankCard">
+      <div class="rankTitle">🏆 燃料ラン ランキング（距離）</div>
+      <div id="rankStatus"></div>
+      <div id="rankNameRow" class="hidden">
+        <input id="rankName" type="text" maxlength="10" placeholder="なまえ（10文字まで）">
+        <button id="rankSubmit">登録</button>
+      </div>
+      <div id="rankList"></div>
+      <button id="rankClose">とじる</button>
+    </div>
+  </div>
 </div>
 <script>
 'use strict';
@@ -123,9 +154,10 @@ function reset() {
   themeIdx = 0; themeSeg = 0; nextThemeAt = 3000; bannerT = 0;
 }
 
-function startGame() { reset(); state = 'play'; sndStart(); }
+function startGame() { reset(); state = 'play'; sndStart(); rankResetRun(); }
 function endGame(reason) {
   state = 'over'; overReason = reason;
+  onRunFinished();
   if (reason === 'bomb') { boomT0 = performance.now(); sndBoom(); } else { sndOver(); }
   const d = Math.floor(dist);
   if (d > best) { best = d; localStorage.setItem('fuelrun_best', String(best)); }
@@ -133,6 +165,7 @@ function endGame(reason) {
 
 // ===== 入力 =====
 window.addEventListener('keydown', (e) => {
+  if (rankOpen) return;   // ランキング表示中・名前入力中はゲーム操作を止める
   if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
   if (e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
   if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') startGame();
@@ -153,6 +186,117 @@ cv.addEventListener('pointerdown', (e) => {
 cv.addEventListener('pointermove', (e) => { if (steerDrag !== null) steerDrag = canvasX(e.clientX); });
 window.addEventListener('pointerup', () => { steerDrag = null; });
 window.addEventListener('pointercancel', () => { steerDrag = null; });
+// ===== オンラインランキング（Firebase / 草むしり検定と同じプロジェクト） =====
+const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyADPpo8CpUiMWmz9yvEDDpcnVphlWTEE5o",
+    authDomain: "kusamushiri-kentei.firebaseapp.com",
+    projectId: "kusamushiri-kentei",
+    storageBucket: "kusamushiri-kentei.firebasestorage.app",
+    messagingSenderId: "595299065568",
+    appId: "1:595299065568:web:3ce7a73b931b7a8df0fa85"
+  };
+let db = null;
+try {
+  if (window.firebase) { firebase.initializeApp(FIREBASE_CONFIG); db = firebase.firestore(); }
+} catch (e) { db = null; }
+let rankOpen = false;        // パネル表示中か
+let pendingRun = false;      // 終わったばかりで未登録の記録があるか
+let submittedRun = false;    // この記録は登録済みか
+let myDocId = null;          // 自分の最新登録のドキュメントID（行ハイライト用）
+const rankPanel = document.getElementById('rankPanel');
+const rankList = document.getElementById('rankList');
+const rankStatus = document.getElementById('rankStatus');
+const rankNameRow = document.getElementById('rankNameRow');
+const rankNameInput = document.getElementById('rankName');
+rankNameInput.value = localStorage.getItem('fuelrun_name') || '';
+
+function rankResetRun() { pendingRun = false; submittedRun = false; myDocId = null; }
+function savedName() { return (localStorage.getItem('fuelrun_name') || '').slice(0, 10); }
+
+function onRunFinished() {
+  pendingRun = true; submittedRun = false;
+  setTimeout(() => { openRank(true); }, 900);   // 結果画面を少し見せてから開く
+}
+
+async function submitRun() {
+  const name = savedName();
+  if (!db || !name || !pendingRun || submittedRun) return;
+  submittedRun = true;
+  rankStatus.textContent = 'ランキングに登録中…';
+  try {
+    const ref = await db.collection('fuelrun_scores').add({ name: name, dist: Math.floor(dist), ts: Date.now() });
+    myDocId = ref.id; pendingRun = false;
+    rankStatus.textContent = 'ランキングに のったよ！';
+    rankNameRow.classList.add('hidden');
+    loadRanking();
+  } catch (e) {
+    submittedRun = false;
+    rankStatus.textContent = 'ランキング登録に失敗しちゃった…';
+  }
+}
+
+function renderRanking(docs) {
+  rankList.innerHTML = '';
+  if (!docs.length) {
+    rankList.innerHTML = '<div class="rankMsg">まだ記録がないよ。最初の一人になろう！</div>';
+    return;
+  }
+  const table = document.createElement('table');
+  docs.forEach((doc, i) => {
+    const d = doc.data();
+    const tr = document.createElement('tr');
+    if (myDocId && doc.id === myDocId) tr.className = 'me';
+    const tdR = document.createElement('td'); tdR.textContent = (i + 1) + '位';
+    const tdN = document.createElement('td'); tdN.textContent = d.name;
+    const tdD = document.createElement('td'); tdD.className = 'n'; tdD.textContent = (d.dist / 1000).toFixed(2) + ' km';
+    tr.appendChild(tdR); tr.appendChild(tdN); tr.appendChild(tdD);
+    table.appendChild(tr);
+  });
+  rankList.appendChild(table);
+}
+
+async function loadRanking() {
+  if (!db) { rankList.innerHTML = '<div class="rankMsg">ランキングは接続準備中…</div>'; return; }
+  rankList.innerHTML = '<div class="rankMsg">読み込み中…</div>';
+  try {
+    const snap = await db.collection('fuelrun_scores').orderBy('dist', 'desc').limit(20).get();
+    renderRanking(snap.docs);
+  } catch (e) {
+    rankList.innerHTML = '<div class="rankMsg">ランキングを読み込めなかった…</div>';
+  }
+}
+
+function openRank(fromOver) {
+  rankOpen = true;
+  rankPanel.classList.remove('hidden');
+  rankStatus.textContent = '';
+  const name = savedName();
+  if (fromOver && pendingRun && !submittedRun) {
+    if (name) { submitRun(); }
+    else {
+      rankStatus.textContent = 'なまえを入れると、この記録がランキングにのるよ';
+      rankNameInput.value = '';
+      rankNameRow.classList.remove('hidden');
+    }
+  } else if (!name) {
+    rankNameRow.classList.remove('hidden');   // 名前を先に決めておくこともできる
+  } else {
+    rankNameRow.classList.add('hidden');
+  }
+  loadRanking();
+}
+function closeRank() { rankOpen = false; rankPanel.classList.add('hidden'); }
+document.getElementById('rankBtn').addEventListener('click', () => openRank(false));
+document.getElementById('rankClose').addEventListener('click', closeRank);
+rankPanel.addEventListener('click', (e) => { if (e.target === rankPanel) closeRank(); });
+document.getElementById('rankSubmit').addEventListener('click', () => {
+  const v = rankNameInput.value.trim().slice(0, 10);
+  if (!v) { rankStatus.textContent = 'なまえを入れてね'; return; }
+  localStorage.setItem('fuelrun_name', v);
+  if (pendingRun && !submittedRun) { submitRun(); }
+  else { rankStatus.textContent = 'なまえを保存したよ。次の記録から のるよ'; rankNameRow.classList.add('hidden'); loadRanking(); }
+});
+
 // iPhone Safari 対策：ダブルタップ拡大・ピンチ・長押しメニューを止める
 let lastTouchEnd = 0;
 document.addEventListener('touchend', (e) => {
