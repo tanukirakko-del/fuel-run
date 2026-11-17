@@ -77,6 +77,11 @@ let fuels = [];                 // {t, lane}
 let spawnTimer = 0, warnTimer = 0, elapsed = 0, sputterT = 0;
 let curveCur = 0, curveTarget = 0, curveTimer = 4;   // カーブ（-1..1、+で右へ曲がる）
 let leanSm = 0, prevPx = 0, lastRatio = 0;           // 車体の傾き（リーン）用
+let stripePhase = 0, stripeAlpha = 1, lastV = 0;     // 縁石・中央線の流れ（目が回らないよう制御）
+// PNGスプライト（読み込めない間はCanvas描画にフォールバック）
+const IMG = {};
+for (const n of ['kart', 'gas', 'water', 'ojisan']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
+function imgOk(i) { return i && i.complete && i.naturalWidth > 0; }
 let scenery = [], nextSceneryAt = 0;                 // 道路わきの景色オブジェクト
 let clouds = [];
 for (let i = 0; i < 5; i++) clouds.push({ x: Math.random() * W, y: 18 + Math.random() * 100, s: 0.7 + Math.random() * 0.6, v: 2 + Math.random() * 4 });
@@ -125,6 +130,11 @@ function update(dt) {
   const eff = speedKmh * (sputterT > 0 ? 0.55 : 1);   // 水缶でエンジン不調中は失速
   const v = eff / 3.6;                                 // m/s
   dist += v * dt;
+  lastV = v;
+  // 縁石・中央線：速いほど1コマを長くして点滅周期を約7回/秒以下に抑え、濃さも落とす（目が回る対策）
+  const segLen = Math.max(22, v / 7);
+  stripePhase = (stripePhase + dt * v / segLen) % 1;
+  stripeAlpha = Math.max(0.3, Math.min(1, 1.18 - v / 420));
   const ratio = eff / (eff + 260);                     // 速度の効き具合（0→1に漸近）
   // 燃料消費（速度に比例）
   fuel -= dt * (1.8 + ratio * 2.2);
@@ -235,7 +245,7 @@ function drawRoad() {
   // 地面：緑の縞（距離で流れて速度感を出す）
   ctx.fillStyle = '#79b657'; ctx.fillRect(0, HORIZON, W, H - HORIZON);
   const bandN = 7;
-  const boff = (dist * 0.045) % 1;
+  const boff = stripePhase;
   ctx.fillStyle = '#8cc96e';
   for (let i = 0; i < bandN; i += 2) {
     let t = (i + boff) / bandN; if (t > 1) t -= 1;
@@ -255,12 +265,14 @@ function drawRoad() {
     ctx.lineTo(centerX(t) + roadHalf(t), projY(t));
   }
   ctx.closePath(); ctx.fill();
-  // 縁石（流れるストライプ）
+  // 縁石（流れるストライプ）※速いときは薄く・長く＝残像っぽくしてチカチカを抑える
   const stripeN = 7;
-  const off = (dist * 0.045) % 1;
+  const off = stripePhase;
+  const dashLen = 0.055 + Math.min(0.10, lastV * 0.00022);
+  ctx.globalAlpha = stripeAlpha;
   for (let i = 0; i < stripeN; i++) {
     let t = (i + off) / stripeN; if (t > 1) t -= 1;
-    const t2 = Math.min(1, t + 0.055);
+    const t2 = Math.min(1, t + dashLen);
     const c1 = centerX(t), c2 = centerX(t2);
     for (const side of [-1, 1]) {
       ctx.fillStyle = (i % 2 === 0) ? '#e8e8e8' : '#d84a4a';
@@ -281,6 +293,7 @@ function drawRoad() {
       ctx.closePath(); ctx.fill();
     }
   }
+  ctx.globalAlpha = 1;
 }
 
 function drawSceneryObj(o) {
@@ -327,11 +340,27 @@ function drawSceneryObj(o) {
 }
 
 function drawFuelCan(f) {
-  // 燃料缶と水缶：同型の携行缶、ラベルの色と文字だけ違う（見分けは一瞬の判断）
   const x = centerX(f.t) + f.lane * roadHalf(f.t);
   const y = projY(f.t);
   const s = objScale(f.t);
   const gas = f.kind !== 'water';
+  // PNGスプライト優先
+  const img = gas ? IMG.gas : IMG.water;
+  if (imgOk(img)) {
+    const w = 64 * s, h = w * img.naturalHeight / img.naturalWidth;
+    ctx.fillStyle = 'rgba(0,0,0,.25)';
+    ctx.beginPath(); ctx.ellipse(x, y + 3, w * 0.42, 4.5 * s, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.drawImage(img, x - w / 2, y + 4 - h, w, h);
+    if (w > 24) {  // ラベルの文字はCanvasで重ねる（遠いと読めない＝見分けの難しさは維持）
+      const lx = gas ? 0.50 : 0.47, ly = gas ? 0.585 : 0.565;
+      ctx.fillStyle = gas ? '#d8402f' : '#2266aa';
+      ctx.font = 'bold ' + Math.round(w * 0.34) + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(gas ? '燃' : '水', x + (lx - 0.5) * w, y + 4 - h + ly * h);
+    }
+    return;
+  }
+  // フォールバック：同型の携行缶をCanvas描画
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(s, s);
@@ -357,6 +386,31 @@ function drawFuelCan(f) {
 }
 
 function drawPlayer() {
+  // PNGスプライト優先（傾き・バウンス・煙はそのまま効く）
+  if (imgOk(IMG.kart)) {
+    const py = projY(0.92);
+    const x = centerX(0.92) + px * roadHalf(0.92);
+    ctx.save();
+    ctx.translate(x, py + Math.sin(elapsed * 26) * (0.5 + lastRatio * 1.1));
+    ctx.rotate(leanSm - curveCur * 0.04);
+    ctx.fillStyle = 'rgba(0,0,0,.28)';
+    ctx.beginPath(); ctx.ellipse(0, 18, 64, 10, 0, 0, Math.PI * 2); ctx.fill();
+    const w = 178, h = w * IMG.kart.naturalHeight / IMG.kart.naturalWidth;
+    ctx.drawImage(IMG.kart, -w / 2, 16 - h, w, h);
+    if (sputterT > 0) {
+      ctx.fillStyle = 'rgba(40,40,40,.5)';
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.arc((Math.random() - .5) * 30, 8 - Math.random() * 14, 5 + Math.random() * 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+    return;
+  }
+  drawPlayerCanvas();
+}
+function drawPlayerCanvas() {
   const py = projY(0.92);
   const x = centerX(0.92) + px * roadHalf(0.92);
   ctx.save();
@@ -539,7 +593,12 @@ function drawOjisan(x, y, s) {
 function drawTitle() {
   drawRoad();
   ctx.fillStyle = 'rgba(20,28,44,.55)'; ctx.fillRect(0, 0, W, H);
-  drawOjisan(W / 2, 92, 0.95);
+  if (imgOk(IMG.ojisan)) {
+    const w = 132, h = w * IMG.ojisan.naturalHeight / IMG.ojisan.naturalWidth;
+    ctx.drawImage(IMG.ojisan, W / 2 - w / 2, 108 - h / 2, w, h);
+  } else {
+    drawOjisan(W / 2, 92, 0.95);
+  }
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
   ctx.font = 'bold 52px sans-serif';
   ctx.fillText('燃料ラン！', W / 2, 208);
