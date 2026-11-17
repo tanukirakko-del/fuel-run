@@ -56,6 +56,7 @@ function beep(freq, dur, type, vol, when) {
   } catch (e) { /* 音が出ない環境では無視 */ }
 }
 const sndPickup = () => { beep(880, .09, 'square', .07); beep(1320, .14, 'square', .07, .08); };
+const sndBad    = () => { beep(150, .22, 'sawtooth', .09); beep(90, .3, 'sawtooth', .09, .1); };
 const sndWarn   = () => beep(220, .12, 'sawtooth', .05);
 const sndOver   = () => { beep(392, .18, 'triangle', .08); beep(330, .18, 'triangle', .08, .18); beep(262, .34, 'triangle', .08, .36); };
 const sndStart  = () => { beep(523, .1, 'square', .06); beep(659, .1, 'square', .06, .1); beep(784, .16, 'square', .06, .2); };
@@ -72,14 +73,14 @@ let speedKmh = 0;               // 表示速度
 let dist = 0;                   // 走行距離 m
 let fuel = 100;
 let fuels = [];                 // {t, lane}
-let spawnTimer = 0, warnTimer = 0, elapsed = 0;
+let spawnTimer = 0, warnTimer = 0, elapsed = 0, sputterT = 0;
 let best = parseInt(localStorage.getItem('fuelrun_best') || '0', 10);
 let keys = { left: false, right: false };
 let steerDrag = null;           // タッチ中の x (canvas座標)
 
 function reset() {
   px = 0; pTarget = 0; speedKmh = 60; dist = 0; fuel = 100;
-  fuels = []; spawnTimer = 0.6; warnTimer = 0; elapsed = 0;
+  fuels = []; spawnTimer = 0.6; warnTimer = 0; elapsed = 0; sputterT = 0;
 }
 
 function startGame() { reset(); state = 'play'; sndStart(); }
@@ -111,14 +112,17 @@ window.addEventListener('pointercancel', () => { steerDrag = null; });
 function update(dt) {
   if (state !== 'play') return;
   elapsed += dt;
-  // オートアクセル：徐々に加速（上限 210km/h）
-  speedKmh = Math.min(210, speedKmh + dt * 4.5);
-  const v = speedKmh / 3.6;                     // m/s
+  // オートアクセル：上限なしで加速し続ける
+  speedKmh += dt * (5 + speedKmh * 0.006);
+  if (sputterT > 0) sputterT -= dt;
+  const eff = speedKmh * (sputterT > 0 ? 0.55 : 1);   // 水缶でエンジン不調中は失速
+  const v = eff / 3.6;                                 // m/s
   dist += v * dt;
-  // 燃料消費（速度に比例）。缶1個で約10秒ぶん
-  fuel -= dt * (1.8 + speedKmh / 210 * 0.9);
-  // ステアリング
-  const steerSpeed = 2.6;
+  const ratio = eff / (eff + 260);                     // 速度の効き具合（0→1に漸近）
+  // 燃料消費（速度に比例）
+  fuel -= dt * (1.8 + ratio * 2.2);
+  // ステアリング（速いほど少しキビキビ）
+  const steerSpeed = 2.6 + ratio * 1.3;
   if (keys.left) pTarget -= steerSpeed * dt;
   if (keys.right) pTarget += steerSpeed * dt;
   if (steerDrag !== null) {
@@ -131,17 +135,25 @@ function update(dt) {
   // 燃料缶の出現と移動
   spawnTimer -= dt;
   if (spawnTimer <= 0) {
-    fuels.push({ t: 0, lane: (Math.random() * 1.7 - 0.85) });
+    // 12秒を過ぎたら約3割が「水」缶（お邪魔アイテム）
+    const kind = (elapsed > 12 && Math.random() < 0.32) ? 'water' : 'gas';
+    fuels.push({ t: 0, lane: (Math.random() * 1.7 - 0.85), kind });
     spawnTimer = 2.4 + Math.random() * 1.2;
   }
-  const tSpeed = 0.16 + (speedKmh / 210) * 0.30;  // 迫ってくる速さ
+  const tSpeed = 0.14 + ratio * 0.5;  // 迫ってくる速さ
   for (const f of fuels) f.t += dt * tSpeed * (0.35 + f.t * 1.5);
   // 取得判定（プレイヤーは t≈0.92 の高さ）
   fuels = fuels.filter((f) => {
     if (f.t > 1.05) return false;
     if (f.t > 0.84 && f.t < 1.0 && Math.abs(f.lane - px) < 0.34) {
-      fuel = Math.min(100, fuel + 25);
-      sndPickup();
+      if (f.kind === 'water') {
+        fuel = Math.max(0, fuel - 18);
+        sputterT = 1.2;
+        sndBad();
+      } else {
+        fuel = Math.min(100, fuel + 25);
+        sndPickup();
+      }
       return false;
     }
     return true;
@@ -204,16 +216,33 @@ function drawRoad() {
 }
 
 function drawFuelCan(f) {
+  // 燃料缶と水缶：同型の携行缶、ラベルの色と文字だけ違う（見分けは一瞬の判断）
   const cx = W / 2;
   const x = cx + f.lane * roadHalf(f.t);
   const y = projY(f.t);
   const s = objScale(f.t);
+  const gas = f.kind !== 'water';
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(s, s);
-  ctx.font = '44px serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-  ctx.fillText('⛽', 0, 4);
+  // 影
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.beginPath(); ctx.ellipse(0, 2, 20, 5, 0, 0, Math.PI * 2); ctx.fill();
+  // 取っ手
+  ctx.fillStyle = gas ? '#a52a20' : '#5d5348';
+  roundRect(-13, -52, 26, 9, 4); ctx.fill();
+  // 本体
+  ctx.fillStyle = gas ? '#d8402f' : '#8a7a63';
+  roundRect(-19, -46, 38, 46, 6); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.18)';
+  roundRect(-19, -46, 12, 46, 6); ctx.fill();
+  // ラベル
+  ctx.fillStyle = '#fff';
+  roundRect(-12, -36, 24, 24, 3); ctx.fill();
+  ctx.fillStyle = gas ? '#d8402f' : '#2266aa';
+  ctx.font = 'bold 17px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(gas ? '燃' : '水', 0, -23);
   ctx.restore();
 }
 
@@ -296,22 +325,62 @@ function drawHUD() {
   if (fuel > 0.5) { roundRect(42, H - 35, fw * fuel / 100, 16, 8); ctx.fill(); }
 }
 
+function drawOjisan(x, y, s) {
+  // 某・赤い帽子のヒゲのおじさん（オリジナルの描き起こし）
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  // 体（青いオーバーオール＋赤シャツ）
+  ctx.fillStyle = '#2456c8'; roundRect(-26, 26, 52, 42, 10); ctx.fill();
+  ctx.fillStyle = '#d8402f'; roundRect(-35, 28, 14, 30, 6); ctx.fill(); roundRect(21, 28, 14, 30, 6); ctx.fill();
+  ctx.fillStyle = '#ffd23e';
+  ctx.beginPath(); ctx.arc(-10, 41, 3.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(10, 41, 3.5, 0, Math.PI * 2); ctx.fill();
+  // 顔と耳
+  ctx.fillStyle = '#f2c79b';
+  ctx.beginPath(); ctx.arc(0, 0, 26, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-26, 2, 7, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(26, 2, 7, 0, Math.PI * 2); ctx.fill();
+  // 鼻
+  ctx.fillStyle = '#eda96f';
+  ctx.beginPath(); ctx.arc(0, 6, 8, 0, Math.PI * 2); ctx.fill();
+  // ヒゲ
+  ctx.fillStyle = '#3a2a1c';
+  ctx.beginPath(); ctx.ellipse(-9, 13, 10, 5.5, -0.25, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(9, 13, 10, 5.5, 0.25, 0, Math.PI * 2); ctx.fill();
+  // 目
+  ctx.fillStyle = '#26221e';
+  ctx.beginPath(); ctx.arc(-10, -3, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(10, -3, 3, 0, Math.PI * 2); ctx.fill();
+  // 赤い帽子
+  ctx.fillStyle = '#d8232a';
+  ctx.beginPath(); ctx.arc(0, -8, 26, Math.PI, Math.PI * 2); ctx.fill();
+  roundRect(-27, -11, 54, 6, 3); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(16, -4, 17, 5, 0, 0, Math.PI * 2); ctx.fill();
+  // 帽子の白丸マーク
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(0, -19, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#d8232a'; ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('★', 0, -18.5);
+  ctx.restore();
+}
+
 function drawTitle() {
   drawRoad();
   ctx.fillStyle = 'rgba(20,28,44,.55)'; ctx.fillRect(0, 0, W, H);
+  drawOjisan(W / 2, 92, 0.95);
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
   ctx.font = 'bold 52px sans-serif';
-  ctx.fillText('燃料ラン！', W / 2, 190);
-  ctx.font = '40px serif'; ctx.fillText('⛽', W / 2, 248);
+  ctx.fillText('燃料ラン！', W / 2, 208);
   ctx.font = '16px sans-serif';
-  ctx.fillText('基本オートアクセル。左右に動くだけ！', W / 2, 300);
-  ctx.fillText('落ちてる ⛽ を拾って燃料を保ち、', W / 2, 328);
-  ctx.fillText('どこまで走れるか競おう', W / 2, 354);
+  ctx.fillText('基本オートアクセル。左右に動くだけ！', W / 2, 292);
+  ctx.fillText('赤い「燃」缶を拾って燃料を保ち、', W / 2, 320);
+  ctx.fillText('茶色い「水」缶はエンジン不調！避けろ', W / 2, 346);
+  ctx.fillText('どこまで走れるか競おう（速度上限なし）', W / 2, 372);
   ctx.font = '14px sans-serif'; ctx.fillStyle = '#cfe3ff';
-  ctx.fillText('操作：←→キー ／ 画面ドラッグ', W / 2, 396);
-  if (best > 0) { ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 17px sans-serif'; ctx.fillText('自己ベスト ' + (best / 1000).toFixed(2) + ' km', W / 2, 430); }
+  ctx.fillText('操作：←→キー ／ 画面ドラッグ', W / 2, 408);
+  if (best > 0) { ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 17px sans-serif'; ctx.fillText('自己ベスト ' + (best / 1000).toFixed(2) + ' km', W / 2, 438); }
   ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 22px sans-serif';
-  ctx.fillText('タップ / スペースでスタート', W / 2, 500);
+  ctx.fillText('タップ / スペースでスタート', W / 2, 505);
 }
 
 function drawOver() {
@@ -337,10 +406,13 @@ function drawOver() {
 
 function draw() {
   if (state === 'title') { drawTitle(); return; }
+  ctx.save();
+  if (sputterT > 0) ctx.translate((Math.random() - .5) * 7, (Math.random() - .5) * 7);  // 不調時は画面が揺れる
   drawRoad();
   // 遠い順に描く
   [...fuels].sort((a, b) => a.t - b.t).forEach(drawFuelCan);
   drawPlayer();
+  ctx.restore();
   drawHUD();
   if (state === 'over') drawOver();
 }
