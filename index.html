@@ -104,7 +104,7 @@ let leanSm = 0, prevPx = 0, lastRatio = 0;           // 車体の傾き（リー
 let stripePhase = 0, stripeAlpha = 1, lastV = 0;     // 縁石・中央線の流れ（目が回らないよう制御）
 // PNGスプライト（読み込めない間はCanvas描画にフォールバック）
 const IMG = {};
-for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2', 'bg0', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
+for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2', 'bg0', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6', 'obj_tree', 'obj_pine', 'obj_palm', 'obj_cactus', 'obj_sign', 'obj_flower', 'obj_rock', 'obj_lamp']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
 function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')'; }
 function imgOk(i) { return i && i.complete && i.naturalWidth > 0; }
 let scenery = [], nextSceneryAt = 0;                 // 道路わきの景色オブジェクト
@@ -419,6 +419,15 @@ function drawSceneryObj(o) {
   const y = projY(t);
   const s = objScale(t) * 1.5;
   ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  // 景色スプライト（PNG優先、無ければ下のCanvas描画）
+  const oimg = IMG['obj_' + o.type];
+  if (imgOk(oimg)) {
+    const OH = { tree: 44, pine: 46, sign: 42, flower: 18, rock: 20, palm: 48, lamp: 46, cactus: 40 };
+    const hh = OH[o.type] || 36, ww = hh * oimg.naturalWidth / oimg.naturalHeight;
+    ctx.drawImage(oimg, -ww / 2, -hh, ww, hh);
+    ctx.restore();
+    return;
+  }
   if (o.type === 'tree') {
     ctx.fillStyle = '#8a5a33'; roundRect(-3, -16, 6, 16, 2); ctx.fill();
     ctx.fillStyle = '#3f9e4d';
