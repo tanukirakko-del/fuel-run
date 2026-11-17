@@ -58,6 +58,8 @@ function beep(freq, dur, type, vol, when) {
 }
 const sndPickup = () => { beep(880, .09, 'square', .07); beep(1320, .14, 'square', .07, .08); };
 const sndBad    = () => { beep(150, .22, 'sawtooth', .09); beep(90, .3, 'sawtooth', .09, .1); };
+const sndBoom   = () => { beep(70, .5, 'sawtooth', .13); beep(50, .7, 'square', .1, .08); beep(120, .3, 'sawtooth', .08, .03); };
+const sndArea   = () => { beep(659, .09, 'square', .06); beep(988, .15, 'square', .06, .09); };
 const sndWarn   = () => beep(220, .12, 'sawtooth', .05);
 const sndOver   = () => { beep(392, .18, 'triangle', .08); beep(330, .18, 'triangle', .08, .18); beep(262, .34, 'triangle', .08, .36); };
 const sndStart  = () => { beep(523, .1, 'square', .06); beep(659, .1, 'square', .06, .1); beep(784, .16, 'square', .06, .2); };
@@ -75,12 +77,33 @@ let dist = 0;                   // 走行距離 m
 let fuel = 100;
 let fuels = [];                 // {t, lane}
 let spawnTimer = 0, warnTimer = 0, elapsed = 0, sputterT = 0;
+let dmg = 0, overReason = null, boomT0 = 0, isOff = false;   // 水缶ダメージ／終了理由／道外判定
+let themeIdx = 0, themeSeg = 0, nextThemeAt = 1500;          // 背景エリア
+let bannerT = 0, bannerTxt = '';
+const THEMES = [
+  { name: '山',    icon: '⛰️', sky: ['#5aa9e6', '#cfe8f7'], back: 'hills', hill: '#7fae6e', mtn: '#8fb8dd', g1: '#79b657', g2: '#8cc96e', road: '#62687a', sun: 'sun' },
+  { name: '海',    icon: '🌊', sky: ['#4fb3e8', '#dff6ff'], back: 'sea',   sea: '#2f9fd8', sand: '#f2ddab', g1: '#f2ddab', g2: '#ecd096', road: '#6b7183', sun: 'sun' },
+  { name: 'ビル街', icon: '🏙️', sky: ['#7d9fd1', '#e8eef7'], back: 'city',  city: '#5a6c8c', g1: '#8f9779', g2: '#a3ad8d', road: '#565d6e', sun: 'sun' },
+  { name: '夜空',  icon: '🌙', sky: ['#0d1b3e', '#274069'], back: 'hills', hill: '#1d2f26', mtn: '#16283f', g1: '#274d33', g2: '#2f5c3e', road: '#3c4356', sun: 'moon', night: true },
+  { name: '夕焼け', icon: '🌇', sky: ['#ff9a56', '#ffd9a0'], back: 'hills', hill: '#8c5a44', mtn: '#a06a52', g1: '#6f7d3a', g2: '#7f9046', road: '#5d5560', sun: 'sunset' },
+  { name: '雪山',  icon: '❄️', sky: ['#a8cdea', '#f4faff'], back: 'hills', hill: '#e8f1f8', mtn: '#cfe0f2', g1: '#eef4fa', g2: '#e2ecf6', road: '#7a8194', sun: 'sun' },
+  { name: '砂漠',  icon: '🏜️', sky: ['#f7c873', '#fdeecb'], back: 'dunes', dune: '#e8b96f', dune2: '#dfa856', g1: '#eec27c', g2: '#e5b96e', road: '#8a7a63', sun: 'sun' },
+];
+const POOLS = [
+  ['tree', 'pine', 'sign', 'flower', 'rock'],
+  ['palm', 'rock', 'sign', 'flower', 'palm'],
+  ['lamp', 'sign', 'tree', 'lamp', 'rock'],
+  ['tree', 'pine', 'lamp', 'rock', 'sign'],
+  ['tree', 'rock', 'sign', 'pine', 'flower'],
+  ['pine', 'pine', 'rock', 'sign', 'tree'],
+  ['cactus', 'rock', 'sign', 'cactus', 'rock'],
+];
 let curveCur = 0, curveTarget = 0, curveTimer = 4;   // カーブ（-1..1、+で右へ曲がる）
 let leanSm = 0, prevPx = 0, lastRatio = 0;           // 車体の傾き（リーン）用
 let stripePhase = 0, stripeAlpha = 1, lastV = 0;     // 縁石・中央線の流れ（目が回らないよう制御）
 // PNGスプライト（読み込めない間はCanvas描画にフォールバック）
 const IMG = {};
-for (const n of ['kart', 'gas', 'water', 'ojisan']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
+for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
 function imgOk(i) { return i && i.complete && i.naturalWidth > 0; }
 let scenery = [], nextSceneryAt = 0;                 // 道路わきの景色オブジェクト
 let clouds = [];
@@ -93,9 +116,17 @@ function reset() {
   px = 0; pTarget = 0; speedKmh = 60; dist = 0; fuel = 100;
   fuels = []; spawnTimer = 0.6; warnTimer = 0; elapsed = 0; sputterT = 0;
   curveCur = 0; curveTarget = 0; curveTimer = 4;
+  dmg = 0; overReason = null; isOff = false;
+  themeIdx = 0; themeSeg = 0; nextThemeAt = 1500; bannerT = 0;
 }
 
 function startGame() { reset(); state = 'play'; sndStart(); }
+function endGame(reason) {
+  state = 'over'; overReason = reason;
+  if (reason === 'bomb') { boomT0 = performance.now(); sndBoom(); } else { sndOver(); }
+  const d = Math.floor(dist);
+  if (d > best) { best = d; localStorage.setItem('fuelrun_best', String(best)); }
+}
 
 // ===== 入力 =====
 window.addEventListener('keydown', (e) => {
@@ -127,7 +158,7 @@ function update(dt) {
   // オートアクセル：上限なしで加速し続ける
   speedKmh += dt * (5 + speedKmh * 0.006);
   if (sputterT > 0) sputterT -= dt;
-  const eff = speedKmh * (sputterT > 0 ? 0.55 : 1);   // 水缶でエンジン不調中は失速
+  const eff = speedKmh * (sputterT > 0 ? 0.55 : 1) * (isOff ? 0.55 : 1);   // 不調・道外で失速
   const v = eff / 3.6;                                 // m/s
   dist += v * dt;
   lastV = v;
@@ -136,8 +167,19 @@ function update(dt) {
   stripePhase = (stripePhase + dt * v / segLen) % 1;
   stripeAlpha = Math.max(0.3, Math.min(1, 1.18 - v / 420));
   const ratio = eff / (eff + 260);                     // 速度の効き具合（0→1に漸近）
-  // 燃料消費（速度に比例）
-  fuel -= dt * (1.8 + ratio * 2.2);
+  // 燃料消費（速度に比例・燃費は悪め）。道外はさらにムダ食い
+  fuel -= dt * (2.4 + ratio * 3.0);
+  if (isOff) fuel -= dt * 2.2;
+  // 背景エリアの切り替え（進むほど1エリアが長くなる）
+  if (bannerT > 0) bannerT -= dt;
+  if (dist >= nextThemeAt) {
+    themeIdx = (themeIdx + 1) % THEMES.length;
+    themeSeg++;
+    nextThemeAt += 1500 + themeSeg * 600;
+    bannerTxt = '次のエリア：' + THEMES[themeIdx].icon + ' ' + THEMES[themeIdx].name;
+    bannerT = 2.2;
+    sndArea();
+  }
   // ステアリング（速いほど少しキビキビ）
   const steerSpeed = 2.6 + ratio * 1.3;
   if (keys.left) pTarget -= steerSpeed * dt;
@@ -145,9 +187,9 @@ function update(dt) {
   if (steerDrag !== null) {
     // ドラッグ位置を道路内位置へ（プレイヤー高さでの道路中心と幅で換算）
     const half = roadHalf(0.92);
-    pTarget = Math.max(-1.05, Math.min(1.05, (steerDrag - centerX(0.92)) / half));
+    pTarget = Math.max(-1.35, Math.min(1.35, (steerDrag - centerX(0.92)) / half));
   }
-  pTarget = Math.max(-1.05, Math.min(1.05, pTarget));
+  pTarget = Math.max(-1.35, Math.min(1.35, pTarget));
   px += (pTarget - px) * Math.min(1, dt * 10);
   // カーブ：遠心力で車体が外側へ流れる
   curveTimer -= dt;
@@ -157,7 +199,8 @@ function update(dt) {
   }
   curveCur += (curveTarget - curveCur) * Math.min(1, dt * 0.8);
   px -= curveCur * (0.30 + 0.45 * ratio) * dt;
-  px = Math.max(-1.05, Math.min(1.05, px));
+  px = Math.max(-1.35, Math.min(1.35, px));
+  isOff = Math.abs(px) > 1.0;   // 道路（|px|<=1）をはみ出したか
   // 車体の傾き：横移動の勢いから目標リーン角を作って滑らかに追う
   lastRatio = ratio;
   const pxVel = (px - prevPx) / Math.max(dt, 0.001);
@@ -167,7 +210,7 @@ function update(dt) {
   // 景色オブジェクトの生成と接近（実距離ベース）
   nextSceneryAt -= v * dt;
   if (nextSceneryAt <= 0) {
-    const types = ['tree', 'pine', 'sign', 'flower', 'rock'];
+    const types = POOLS[themeIdx];
     scenery.push({ z: 175, side: Math.random() < 0.5 ? -1 : 1, type: types[Math.floor(Math.random() * types.length)], off: 0.9 + Math.random() * 0.8 });
     nextSceneryAt = 20 + Math.random() * 22;
   }
@@ -180,7 +223,7 @@ function update(dt) {
     // 12秒を過ぎたら約3割が「水」缶（お邪魔アイテム）
     const kind = (elapsed > 12 && Math.random() < 0.32) ? 'water' : 'gas';
     fuels.push({ t: 0, lane: (Math.random() * 1.7 - 0.85), kind });
-    spawnTimer = (2.4 + Math.random() * 1.2) * (140 / (140 + eff));  // 速いほど出現も密に
+    spawnTimer = (3.2 + Math.random() * 1.6) * (140 / (140 + eff));  // 出現頻度は低め。速いほど出現も密に
   }
   // アイテムの接近は実速度（m/s）に比例：速ければ速いほど速く流れてくる
   const approach = v / 150;
@@ -193,6 +236,8 @@ function update(dt) {
         fuel = Math.max(0, fuel - 18);
         sputterT = 1.2;
         sndBad();
+        dmg++;   // 水缶ダメージ蓄積。10回で爆発
+        if (dmg >= 10) { endGame('bomb'); return false; }
       } else {
         fuel = Math.min(100, fuel + 25);
         sndPickup();
@@ -203,10 +248,8 @@ function update(dt) {
   });
   // 燃料警告
   if (fuel < 25) { warnTimer -= dt; if (warnTimer <= 0) { sndWarn(); warnTimer = 1.0; } }
-  if (fuel <= 0) {
-    fuel = 0; state = 'over'; sndOver();
-    const d = Math.floor(dist);
-    if (d > best) { best = d; localStorage.setItem('fuelrun_best', String(best)); }
+  if (fuel <= 0 && state === 'play') {
+    fuel = 0; endGame('gas');
   }
 }
 
@@ -221,39 +264,89 @@ function drawCloud(c) {
   ctx.restore();
 }
 function drawRoad() {
-  // 空と遠景（カーブ方向と逆へ少し流して視差を出す）
+  const TH = THEMES[themeIdx];
+  // 空
   const sky = ctx.createLinearGradient(0, 0, 0, HORIZON);
-  sky.addColorStop(0, '#5aa9e6'); sky.addColorStop(1, '#cfe8f7');
+  sky.addColorStop(0, TH.sky[0]); sky.addColorStop(1, TH.sky[1]);
   ctx.fillStyle = sky; ctx.fillRect(0, 0, W, HORIZON);
+  if (TH.night) {  // 星
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < 46; i++) {
+      ctx.globalAlpha = 0.35 + 0.4 * Math.abs(Math.sin(elapsed * 1.5 + i));
+      ctx.fillRect((i * 97) % W, (i * 57) % (HORIZON - 46) + 6, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+  }
   ctx.save();
   ctx.translate(-curveCur * 24, 0);
-  ctx.fillStyle = '#f7d774';
-  ctx.beginPath(); ctx.arc(W - 66, 52, 24, 0, Math.PI * 2); ctx.fill();   // 太陽
-  ctx.fillStyle = '#ffe9a0';
-  ctx.beginPath(); ctx.arc(W - 66, 52, 30, 0, Math.PI * 2); ctx.globalAlpha = 0.35; ctx.fill(); ctx.globalAlpha = 1;
-  // 遠くの山（三角シルエット）
-  ctx.fillStyle = '#8fb8dd';
-  ctx.beginPath();
-  ctx.moveTo(-40, HORIZON); ctx.lineTo(40, HORIZON - 74); ctx.lineTo(110, HORIZON);
-  ctx.lineTo(190, HORIZON - 58); ctx.lineTo(260, HORIZON); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#7fae6e';
-  ctx.beginPath();                                                        // 丘
-  ctx.moveTo(-40, HORIZON); ctx.quadraticCurveTo(90, HORIZON - 52, 210, HORIZON);
-  ctx.quadraticCurveTo(320, HORIZON - 40, W + 40, HORIZON); ctx.closePath(); ctx.fill();
+  // 太陽・月・夕日
+  if (TH.sun === 'moon') {
+    ctx.fillStyle = '#f4f1d8';
+    ctx.beginPath(); ctx.arc(W - 66, 52, 20, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = TH.sky[0];
+    ctx.beginPath(); ctx.arc(W - 57, 45, 17, 0, Math.PI * 2); ctx.fill();
+  } else if (TH.sun === 'sunset') {
+    ctx.fillStyle = '#ffdf8a';
+    ctx.beginPath(); ctx.arc(96, HORIZON - 24, 34, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffb347';
+    ctx.beginPath(); ctx.arc(96, HORIZON - 24, 27, 0, Math.PI * 2); ctx.fill();
+  } else {
+    ctx.fillStyle = '#ffe9a0'; ctx.globalAlpha = 0.35;
+    ctx.beginPath(); ctx.arc(W - 66, 52, 30, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#f7d774';
+    ctx.beginPath(); ctx.arc(W - 66, 52, 24, 0, Math.PI * 2); ctx.fill();
+  }
+  // 遠景レイヤー
+  if (TH.back === 'hills') {
+    ctx.fillStyle = TH.mtn;
+    ctx.beginPath();
+    ctx.moveTo(-40, HORIZON); ctx.lineTo(40, HORIZON - 74); ctx.lineTo(110, HORIZON);
+    ctx.lineTo(190, HORIZON - 58); ctx.lineTo(260, HORIZON); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = TH.hill;
+    ctx.beginPath();
+    ctx.moveTo(-40, HORIZON); ctx.quadraticCurveTo(90, HORIZON - 52, 210, HORIZON);
+    ctx.quadraticCurveTo(320, HORIZON - 40, W + 40, HORIZON); ctx.closePath(); ctx.fill();
+  } else if (TH.back === 'sea') {
+    ctx.fillStyle = TH.sea;
+    ctx.fillRect(-40, HORIZON - 34, W + 80, 34);
+    ctx.fillStyle = 'rgba(255,255,255,.55)';
+    for (let i = 0; i < 12; i++) {
+      const wx = ((i * 67 + Math.floor(dist / 30) * 13) % (W + 60)) - 30;
+      ctx.fillRect(wx, HORIZON - 26 + (i % 3) * 9, 16, 2);
+    }
+    ctx.fillStyle = TH.sand;
+    ctx.fillRect(-40, HORIZON - 4, W + 80, 4);
+  } else if (TH.back === 'city') {
+    ctx.fillStyle = TH.city;
+    let bx = -30;
+    for (let i = 0; bx < W + 40; i++) {
+      const bw = 30 + (i * 37) % 26, bh = 34 + (i * 53) % 62;
+      ctx.fillRect(bx, HORIZON - bh, bw, bh);
+      bx += bw + 4;
+    }
+  } else if (TH.back === 'dunes') {
+    ctx.fillStyle = TH.dune2;
+    ctx.beginPath();
+    ctx.moveTo(-40, HORIZON); ctx.quadraticCurveTo(120, HORIZON - 44, 300, HORIZON); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = TH.dune;
+    ctx.beginPath();
+    ctx.moveTo(140, HORIZON); ctx.quadraticCurveTo(300, HORIZON - 30, W + 40, HORIZON); ctx.closePath(); ctx.fill();
+  }
   ctx.restore();
-  clouds.forEach(drawCloud);
-  // 地面：緑の縞（距離で流れて速度感を出す）
-  ctx.fillStyle = '#79b657'; ctx.fillRect(0, HORIZON, W, H - HORIZON);
+  if (!TH.night) clouds.forEach(drawCloud);
+  // 地面：縞（距離で流れて速度感を出す）
+  ctx.fillStyle = TH.g1; ctx.fillRect(0, HORIZON, W, H - HORIZON);
   const bandN = 7;
   const boff = stripePhase;
-  ctx.fillStyle = '#8cc96e';
+  ctx.fillStyle = TH.g2;
   for (let i = 0; i < bandN; i += 2) {
     let t = (i + boff) / bandN; if (t > 1) t -= 1;
     const t2 = Math.min(1, t + 1 / bandN);
     ctx.fillRect(0, projY(t), W, projY(t2) - projY(t) + 1);
   }
   // 道路（カーブに沿って中心がずれる帯）
-  ctx.fillStyle = '#62687a';
+  ctx.fillStyle = TH.road;
   ctx.beginPath();
   const SEG = 12;
   for (let i = 0; i <= SEG; i++) {
@@ -329,6 +422,34 @@ function drawSceneryObj(o) {
       ctx.beginPath(); ctx.arc(-14 + i * 5.5, -2 - (i % 3) * 2, 2.4, 0, Math.PI * 2); ctx.fill();
     }
     ctx.fillStyle = '#3f9e4d'; ctx.fillRect(-17, -2, 34, 3);
+  } else if (o.type === 'palm') {
+    ctx.strokeStyle = '#8a5a33'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(4, -18, 9, -30); ctx.stroke();
+    ctx.strokeStyle = '#3f9e4d'; ctx.lineWidth = 4;
+    for (let i = 0; i < 5; i++) {
+      const a = -0.4 - i * 0.5;
+      ctx.beginPath(); ctx.moveTo(9, -30);
+      ctx.quadraticCurveTo(9 + Math.cos(a) * 13, -30 + Math.sin(a) * 8 - 4, 9 + Math.cos(a) * 20, -30 + Math.sin(a) * 13 + 4);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#7a4a21';
+    ctx.beginPath(); ctx.arc(6, -27, 3.4, 0, Math.PI * 2); ctx.arc(13, -26, 3.4, 0, Math.PI * 2); ctx.fill();
+  } else if (o.type === 'lamp') {
+    ctx.fillStyle = '#4a4f58'; roundRect(-2, -38, 4, 38, 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(0, -38); ctx.quadraticCurveTo(8, -42, 13, -38); ctx.lineTo(13, -34); ctx.quadraticCurveTo(8, -37, 0, -33); ctx.closePath(); ctx.fill();
+    if (THEMES[themeIdx].night) {
+      ctx.fillStyle = 'rgba(255,220,130,.35)';
+      ctx.beginPath(); ctx.arc(13, -31, 10, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = '#ffd76e';
+    ctx.beginPath(); ctx.arc(13, -32, 3.6, 0, Math.PI * 2); ctx.fill();
+  } else if (o.type === 'cactus') {
+    ctx.fillStyle = '#3f9e4d';
+    roundRect(-5, -34, 10, 34, 5); ctx.fill();
+    roundRect(-14, -24, 6, 14, 3); ctx.fill(); roundRect(-14, -16, 12, 6, 3); ctx.fill();
+    roundRect(8, -28, 6, 16, 3); ctx.fill(); roundRect(2, -20, 12, 6, 3); ctx.fill();
+    ctx.fillStyle = '#ff7eb6';
+    ctx.beginPath(); ctx.arc(0, -36, 3.4, 0, Math.PI * 2); ctx.fill();
   } else { // rock
     ctx.fillStyle = '#9aa0a8';
     ctx.beginPath();
@@ -392,14 +513,24 @@ function drawPlayer() {
     const x = centerX(0.92) + px * roadHalf(0.92);
     ctx.save();
     ctx.translate(x, py + Math.sin(elapsed * 26) * (0.5 + lastRatio * 1.1));
-    ctx.rotate(leanSm - curveCur * 0.04);
+    ctx.rotate(leanSm - curveCur * 0.04 + (dmg >= 7 ? Math.sin(elapsed * 30) * 0.012 : 0));
     ctx.fillStyle = 'rgba(0,0,0,.28)';
     ctx.beginPath(); ctx.ellipse(0, 18, 64, 10, 0, 0, Math.PI * 2); ctx.fill();
-    const w = 178, h = w * IMG.kart.naturalHeight / IMG.kart.naturalWidth;
-    ctx.drawImage(IMG.kart, -w / 2, 16 - h, w, h);
-    if (sputterT > 0) {
-      ctx.fillStyle = 'rgba(40,40,40,.5)';
-      for (let i = 0; i < 3; i++) {
+    if (isOff) {  // 道外の土ぼこり
+      ctx.fillStyle = 'rgba(178,144,96,.55)';
+      for (let i = 0; i < 4; i++) {
+        ctx.beginPath();
+        ctx.arc((Math.random() - .5) * 120, 14 + Math.random() * 6, 5 + Math.random() * 8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    const kimg = (dmg >= 7 && imgOk(IMG.kart_dmg2)) ? IMG.kart_dmg2 : (dmg >= 4 && imgOk(IMG.kart_dmg1)) ? IMG.kart_dmg1 : IMG.kart;
+    const w = 178, h = w * kimg.naturalHeight / kimg.naturalWidth;
+    ctx.drawImage(kimg, -w / 2, 16 - h, w, h);
+    const puffs = (sputterT > 0 ? 3 : 0) + (dmg >= 7 ? 2 : dmg >= 4 ? 1 : 0);
+    if (puffs > 0) {
+      ctx.fillStyle = dmg >= 4 ? 'rgba(35,35,35,.55)' : 'rgba(40,40,40,.5)';
+      for (let i = 0; i < puffs; i++) {
         ctx.beginPath();
         ctx.arc((Math.random() - .5) * 30, 8 - Math.random() * 14, 5 + Math.random() * 6, 0, Math.PI * 2);
         ctx.fill();
@@ -524,12 +655,31 @@ function drawHUD() {
   }
   // 距離
   ctx.fillStyle = 'rgba(0,0,0,.45)';
-  roundRect(10, 10, 168, 56, 10); ctx.fill();
+  roundRect(10, 10, 178, 76, 10); ctx.fill();
   ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   ctx.font = 'bold 22px sans-serif';
   ctx.fillText((dist / 1000).toFixed(2) + ' km', 20, 36);
   ctx.font = '12px sans-serif'; ctx.fillStyle = '#cfe3ff';
   ctx.fillText('ベスト ' + (best / 1000).toFixed(2) + ' km', 20, 56);
+  ctx.fillText(THEMES[themeIdx].icon + ' ' + THEMES[themeIdx].name + (dmg > 0 ? '　💥水缶×' + dmg : ''), 20, 74);
+  // 道外警告
+  if (state === 'play' && isOff) {
+    ctx.fillStyle = 'rgba(160,30,20,.75)';
+    roundRect(W / 2 - 92, 96, 184, 28, 8); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('⚠ 道外！減速＆燃料ムダ食い中', W / 2, 111);
+    ctx.textBaseline = 'alphabetic';
+  }
+  // エリア切り替えバナー
+  if (state === 'play' && bannerT > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,.55)';
+    roundRect(W / 2 - 110, 132, 220, 36, 10); ctx.fill();
+    ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(bannerTxt, W / 2, 151);
+    ctx.textBaseline = 'alphabetic';
+  }
   // 速度
   ctx.fillStyle = 'rgba(0,0,0,.45)';
   roundRect(W - 118, 10, 108, 56, 10); ctx.fill();
@@ -594,7 +744,7 @@ function drawTitle() {
   drawRoad();
   ctx.fillStyle = 'rgba(20,28,44,.55)'; ctx.fillRect(0, 0, W, H);
   if (imgOk(IMG.ojisan)) {
-    const w = 132, h = w * IMG.ojisan.naturalHeight / IMG.ojisan.naturalWidth;
+    const w = 106, h = w * IMG.ojisan.naturalHeight / IMG.ojisan.naturalWidth;
     ctx.drawImage(IMG.ojisan, W / 2 - w / 2, 108 - h / 2, w, h);
   } else {
     drawOjisan(W / 2, 92, 0.95);
@@ -614,13 +764,37 @@ function drawTitle() {
   ctx.fillText('タップ / スペースでスタート', W / 2, 505);
 }
 
+function drawBoom() {
+  const age = (performance.now() - boomT0) / 1000;
+  if (age < 0 || age > 1) return;
+  const bx = centerX(0.92) + px * roadHalf(0.92), by = projY(0.92) - 36;
+  const r = 20 + age * 150, a = 1 - age;
+  ctx.save();
+  for (const [rr, col] of [[1, '#ff7b2e'], [0.68, '#ffb347'], [0.4, '#fff3b0']]) {
+    ctx.fillStyle = col; ctx.globalAlpha = a * 0.9;
+    ctx.beginPath(); ctx.arc(bx, by, r * rr, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.strokeStyle = '#ff7b2e'; ctx.globalAlpha = a; ctx.lineWidth = 4;
+  for (let i = 0; i < 8; i++) {
+    const ang = i * Math.PI / 4 + 0.4;
+    ctx.beginPath();
+    ctx.moveTo(bx + Math.cos(ang) * r * 0.8, by + Math.sin(ang) * r * 0.8);
+    ctx.lineTo(bx + Math.cos(ang) * r * 1.25, by + Math.sin(ang) * r * 1.25);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 function drawOver() {
   drawRoad();
-  drawPlayer();
+  if (overReason !== 'bomb') drawPlayer();
   ctx.fillStyle = 'rgba(20,28,44,.62)'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
   ctx.font = 'bold 38px sans-serif';
-  ctx.fillText('ガス欠…！', W / 2, 210);
+  ctx.fillText(overReason === 'bomb' ? '💥 爆発…！' : 'ガス欠…！', W / 2, 210);
+  if (overReason === 'bomb') {
+    ctx.font = '14px sans-serif'; ctx.fillStyle = '#ffb3a0';
+    ctx.fillText('水缶10個目でエンジンが限界を迎えた', W / 2, 238);
+  }
   ctx.font = '16px sans-serif';
   ctx.fillText('記録', W / 2, 268);
   ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 48px sans-serif';
@@ -646,7 +820,7 @@ function draw() {
   drawPlayer();
   ctx.restore();
   drawHUD();
-  if (state === 'over') drawOver();
+  if (state === 'over') { drawOver(); if (overReason === 'bomb') drawBoom(); }
 }
 
 // ===== メインループ =====
