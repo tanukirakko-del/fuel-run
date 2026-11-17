@@ -78,7 +78,7 @@ let fuel = 100;
 let fuels = [];                 // {t, lane}
 let spawnTimer = 0, warnTimer = 0, elapsed = 0, sputterT = 0;
 let dmg = 0, overReason = null, boomT0 = 0, isOff = false;   // 水缶ダメージ／終了理由／道外判定
-let themeIdx = 0, themeSeg = 0, nextThemeAt = 1500;          // 背景エリア
+let themeIdx = 0, themeSeg = 0, nextThemeAt = 3000;          // 背景エリア
 let bannerT = 0, bannerTxt = '';
 const THEMES = [
   { name: '山',    icon: '⛰️', sky: ['#5aa9e6', '#cfe8f7'], back: 'hills', hill: '#7fae6e', mtn: '#8fb8dd', g1: '#79b657', g2: '#8cc96e', road: '#62687a', sun: 'sun' },
@@ -103,7 +103,8 @@ let leanSm = 0, prevPx = 0, lastRatio = 0;           // 車体の傾き（リー
 let stripePhase = 0, stripeAlpha = 1, lastV = 0;     // 縁石・中央線の流れ（目が回らないよう制御）
 // PNGスプライト（読み込めない間はCanvas描画にフォールバック）
 const IMG = {};
-for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
+for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2', 'bg0', 'bg1', 'bg2', 'bg3']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
+function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')'; }
 function imgOk(i) { return i && i.complete && i.naturalWidth > 0; }
 let scenery = [], nextSceneryAt = 0;                 // 道路わきの景色オブジェクト
 let clouds = [];
@@ -117,7 +118,7 @@ function reset() {
   fuels = []; spawnTimer = 0.6; warnTimer = 0; elapsed = 0; sputterT = 0;
   curveCur = 0; curveTarget = 0; curveTimer = 4;
   dmg = 0; overReason = null; isOff = false;
-  themeIdx = 0; themeSeg = 0; nextThemeAt = 1500; bannerT = 0;
+  themeIdx = 0; themeSeg = 0; nextThemeAt = 3000; bannerT = 0;
 }
 
 function startGame() { reset(); state = 'play'; sndStart(); }
@@ -175,7 +176,7 @@ function update(dt) {
   if (dist >= nextThemeAt) {
     themeIdx = (themeIdx + 1) % THEMES.length;
     themeSeg++;
-    nextThemeAt += 1500 + themeSeg * 600;
+    nextThemeAt += 3000 + themeSeg * 1000;
     bannerTxt = '次のエリア：' + THEMES[themeIdx].icon + ' ' + THEMES[themeIdx].name;
     bannerT = 2.2;
     sndArea();
@@ -265,6 +266,19 @@ function drawCloud(c) {
 }
 function drawRoad() {
   const TH = THEMES[themeIdx];
+  // 背景PNG（ある エリアはイラスト背景を優先し、下端を地面色へフェード）
+  const bgImg = IMG['bg' + themeIdx];
+  const useBg = imgOk(bgImg);
+  if (useBg) {
+    const bw = W + 60, bh = bw * bgImg.naturalHeight / bgImg.naturalWidth;
+    ctx.drawImage(bgImg, -30 - curveCur * 24, (HORIZON + 4) - bh, bw, bh);
+    const fg = ctx.createLinearGradient(0, HORIZON - 22, 0, HORIZON + 4);
+    fg.addColorStop(0, hexA(TH.g1, 0));
+    fg.addColorStop(1, hexA(TH.g1, 1));
+    ctx.fillStyle = fg;
+    ctx.fillRect(0, HORIZON - 22, W, 26);
+  }
+  if (!useBg) {
   // 空
   const sky = ctx.createLinearGradient(0, 0, 0, HORIZON);
   sky.addColorStop(0, TH.sky[0]); sky.addColorStop(1, TH.sky[1]);
@@ -334,7 +348,8 @@ function drawRoad() {
     ctx.moveTo(140, HORIZON); ctx.quadraticCurveTo(300, HORIZON - 30, W + 40, HORIZON); ctx.closePath(); ctx.fill();
   }
   ctx.restore();
-  if (!TH.night) clouds.forEach(drawCloud);
+  }
+  if (!TH.night && !(useBg && themeIdx === 3)) clouds.forEach(drawCloud);
   // 地面：縞（距離で流れて速度感を出す）
   ctx.fillStyle = TH.g1; ctx.fillRect(0, HORIZON, W, H - HORIZON);
   const bandN = 7;
