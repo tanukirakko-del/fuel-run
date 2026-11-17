@@ -197,9 +197,10 @@ function update(dt) {
   // 惰性の引っ張り：ステアした反対方向へ力が溜まり、指を止めても／離しても しばらく引っ張り続ける
   const inputVel = Math.max(-7, Math.min(7, (pTarget - ptBefore) / Math.max(dt, 0.001)));
   inputVelSm += (inputVel - inputVelSm) * Math.min(1, dt * 10);
-  pull -= inputVelSm * 0.85 * dt;
+  const curveAmt = Math.min(1, Math.abs(curveCur) / 0.7);   // 反動はカーブ中だけ効かせる
+  pull -= inputVelSm * 0.85 * curveAmt * dt;
   pull = Math.max(-1.0, Math.min(1.0, pull));
-  pull *= Math.pow(0.46, dt);
+  pull *= Math.pow(curveAmt < 0.15 ? 0.02 : 0.46, dt);      // 直線では引っ張りを速く消す
   pTarget += pull * dt;
   px += pull * dt;
   // 指で押さえている間は追従を強くして「指に吸い付く」感じに
