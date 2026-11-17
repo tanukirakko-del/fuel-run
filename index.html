@@ -103,7 +103,7 @@ let leanSm = 0, prevPx = 0, lastRatio = 0;           // 車体の傾き（リー
 let stripePhase = 0, stripeAlpha = 1, lastV = 0;     // 縁石・中央線の流れ（目が回らないよう制御）
 // PNGスプライト（読み込めない間はCanvas描画にフォールバック）
 const IMG = {};
-for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2', 'bg0', 'bg1', 'bg2', 'bg3']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
+for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2', 'bg0', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
 function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')'; }
 function imgOk(i) { return i && i.complete && i.naturalWidth > 0; }
 let scenery = [], nextSceneryAt = 0;                 // 道路わきの景色オブジェクト
@@ -182,7 +182,7 @@ function update(dt) {
     sndArea();
   }
   // ステアリング（速いほど少しキビキビ）
-  const steerSpeed = 2.6 + ratio * 1.3;
+  const steerSpeed = 2.9 + ratio * 1.5;
   if (keys.left) pTarget -= steerSpeed * dt;
   if (keys.right) pTarget += steerSpeed * dt;
   if (steerDrag !== null) {
@@ -191,7 +191,8 @@ function update(dt) {
     pTarget = Math.max(-1.35, Math.min(1.35, (steerDrag - centerX(0.92)) / half));
   }
   pTarget = Math.max(-1.35, Math.min(1.35, pTarget));
-  px += (pTarget - px) * Math.min(1, dt * 10);
+  // 指で押さえている間は追従を強くして「指に吸い付く」感じに
+  px += (pTarget - px) * Math.min(1, dt * (steerDrag !== null ? 16 : 11));
   // カーブ：遠心力で車体が外側へ流れる
   curveTimer -= dt;
   if (curveTimer <= 0) {
@@ -199,7 +200,11 @@ function update(dt) {
     curveTimer = 5 + Math.random() * 4;
   }
   curveCur += (curveTarget - curveCur) * Math.min(1, dt * 0.8);
-  px -= curveCur * (0.30 + 0.45 * ratio) * dt;
+  // 遠心力は少しマイルドに。カーブ内側へ切っている間／指で押さえている間はグリップが効いてさらに弱まる
+  let drift = curveCur * (0.22 + 0.34 * ratio);
+  const gripping = steerDrag !== null || (keys.right && curveCur > 0) || (keys.left && curveCur < 0);
+  if (gripping) drift *= 0.55;
+  px -= drift * dt;
   px = Math.max(-1.35, Math.min(1.35, px));
   isOff = Math.abs(px) > 1.0;   // 道路（|px|<=1）をはみ出したか
   // 車体の傾き：横移動の勢いから目標リーン角を作って滑らかに追う
