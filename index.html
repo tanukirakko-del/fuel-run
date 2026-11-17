@@ -104,7 +104,7 @@ let leanSm = 0, prevPx = 0, lastRatio = 0;           // 車体の傾き（リー
 let stripePhase = 0, stripeAlpha = 1, lastV = 0;     // 縁石・中央線の流れ（目が回らないよう制御）
 // PNGスプライト（読み込めない間はCanvas描画にフォールバック）
 const IMG = {};
-for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2', 'bg0', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6', 'obj_tree', 'obj_pine', 'obj_palm', 'obj_cactus', 'obj_sign', 'obj_flower', 'obj_rock', 'obj_lamp']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
+for (const n of ['kart', 'gas', 'water', 'ojisan', 'kart_dmg1', 'kart_dmg2', 'bg0', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6', 'obj_tree', 'obj_pine', 'obj_palm', 'obj_cactus', 'obj_sign', 'obj_flower', 'obj_rock', 'obj_lamp', 'title']) { const i = new Image(); i.src = 'assets/' + n + '.png'; IMG[n] = i; }
 function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')'; }
 function imgOk(i) { return i && i.complete && i.naturalWidth > 0; }
 let scenery = [], nextSceneryAt = 0;                 // 道路わきの景色オブジェクト
@@ -775,7 +775,21 @@ function drawOjisan(x, y, s) {
 function drawTitle() {
   drawRoad();
   ctx.fillStyle = 'rgba(20,28,44,.55)'; ctx.fillRect(0, 0, W, H);
-  if (imgOk(IMG.ojisan)) {
+  let titleY = 208, subY = 292;
+  if (imgOk(IMG.title)) {
+    // トップ絵（カード表示）
+    const tw = 352, th = tw * IMG.title.naturalHeight / IMG.title.naturalWidth, tx = W / 2 - tw / 2, ty = 34;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 14; ctx.shadowOffsetY = 4;
+    ctx.fillStyle = '#fff';
+    roundRect(tx - 4, ty - 4, tw + 8, th + 8, 14); ctx.fill();
+    ctx.restore();
+    ctx.save();
+    roundRect(tx, ty, tw, th, 10); ctx.clip();
+    ctx.drawImage(IMG.title, tx, ty, tw, th);
+    ctx.restore();
+    titleY = 248; subY = 316;
+  } else if (imgOk(IMG.ojisan)) {
     const w = 106, h = w * IMG.ojisan.naturalHeight / IMG.ojisan.naturalWidth;
     ctx.drawImage(IMG.ojisan, W / 2 - w / 2, 108 - h / 2, w, h);
   } else {
@@ -783,17 +797,17 @@ function drawTitle() {
   }
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
   ctx.font = 'bold 52px sans-serif';
-  ctx.fillText('燃料ラン！', W / 2, 208);
+  ctx.fillText('燃料ラン！', W / 2, titleY);
   ctx.font = '16px sans-serif';
-  ctx.fillText('基本オートアクセル。左右に動くだけ！', W / 2, 292);
-  ctx.fillText('赤い「燃」缶を拾って燃料を保ち、', W / 2, 320);
-  ctx.fillText('茶色い「水」缶はエンジン不調！避けろ', W / 2, 346);
-  ctx.fillText('どこまで走れるか競おう（速度上限なし）', W / 2, 372);
+  ctx.fillText('基本オートアクセル。左右に動くだけ！', W / 2, subY);
+  ctx.fillText('赤い「燃」缶を拾って燃料を保ち、', W / 2, subY + 28);
+  ctx.fillText('茶色い「水」缶はエンジン不調！避けろ', W / 2, subY + 54);
+  ctx.fillText('どこまで走れるか競おう（速度上限なし）', W / 2, subY + 80);
   ctx.font = '14px sans-serif'; ctx.fillStyle = '#cfe3ff';
-  ctx.fillText('操作：←→キー ／ 画面ドラッグ', W / 2, 408);
-  if (best > 0) { ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 17px sans-serif'; ctx.fillText('自己ベスト ' + (best / 1000).toFixed(2) + ' km', W / 2, 438); }
+  ctx.fillText('操作：←→キー ／ 画面ドラッグ', W / 2, subY + 116);
+  if (best > 0) { ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 17px sans-serif'; ctx.fillText('自己ベスト ' + (best / 1000).toFixed(2) + ' km', W / 2, subY + 146); }
   ctx.fillStyle = '#ffd23e'; ctx.font = 'bold 22px sans-serif';
-  ctx.fillText('タップ / スペースでスタート', W / 2, 505);
+  ctx.fillText('タップ / スペースでスタート', W / 2, subY + 196);
 }
 
 function drawBoom() {
