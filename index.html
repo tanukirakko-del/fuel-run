@@ -78,7 +78,7 @@ let fuel = 100;
 let fuels = [];                 // {t, lane}
 let spawnTimer = 0, warnTimer = 0, elapsed = 0, sputterT = 0;
 let dmg = 0, overReason = null, boomT0 = 0, isOff = false;   // 水缶ダメージ／終了理由／道外判定
-let pull = 0, inputVelSm = 0;                                 // 惰性の引っ張り（ステアと反対方向へ溜まる）
+let pvx = 0;                                                  // 横速度（惰性モデル）
 let themeIdx = 0, themeSeg = 0, nextThemeAt = 3000;          // 背景エリア
 let bannerT = 0, bannerTxt = '';
 const THEMES = [
@@ -119,7 +119,7 @@ function reset() {
   fuels = []; spawnTimer = 0.6; warnTimer = 0; elapsed = 0; sputterT = 0;
   curveCur = 0; curveTarget = 0; curveTimer = 4;
   dmg = 0; overReason = null; isOff = false;
-  pull = 0; inputVelSm = 0;
+  pvx = 0;
   themeIdx = 0; themeSeg = 0; nextThemeAt = 3000; bannerT = 0;
 }
 
@@ -183,28 +183,21 @@ function update(dt) {
     bannerT = 2.2;
     sndArea();
   }
-  // ステアリング（速いほど少しキビキビ）
-  const ptBefore = pTarget;
-  const steerSpeed = 2.9 + ratio * 1.5;
-  if (keys.left) pTarget -= steerSpeed * dt;
-  if (keys.right) pTarget += steerSpeed * dt;
+  // ===== 横移動は「横速度＋摩擦」の惰性モデル =====
+  // 参考: Jake Gordon の javascript-racer（操舵は速度比例・遠心力係数0.3）と、そのESP32移植版（摩擦で惰性走行）
   if (steerDrag !== null) {
     // ドラッグ位置を道路内位置へ（プレイヤー高さでの道路中心と幅で換算）
     const half = roadHalf(0.92);
     pTarget = Math.max(-1.35, Math.min(1.35, (steerDrag - centerX(0.92)) / half));
   }
-  pTarget = Math.max(-1.35, Math.min(1.35, pTarget));
-  // 惰性の引っ張り：ステアした反対方向へ力が溜まり、指を止めても／離しても しばらく引っ張り続ける
-  const inputVel = Math.max(-7, Math.min(7, (pTarget - ptBefore) / Math.max(dt, 0.001)));
-  inputVelSm += (inputVel - inputVelSm) * Math.min(1, dt * 10);
-  const curveAmt = Math.min(1, Math.abs(curveCur) / 0.7);   // 反動はカーブ中だけ効かせる
-  pull -= inputVelSm * 0.85 * curveAmt * dt;
-  pull = Math.max(-1.0, Math.min(1.0, pull));
-  pull *= Math.pow(curveAmt < 0.15 ? 0.02 : 0.46, dt);      // 直線では引っ張りを速く消す
-  pTarget += pull * dt;
-  px += pull * dt;
-  // 指で押さえている間は追従を強くして「指に吸い付く」感じに
-  px += (pTarget - px) * Math.min(1, dt * (steerDrag !== null ? 16 : 11));
+  const steerMax = 0.5 + 2.3 * ratio;   // 最高横速度（速いほど速く横へ動ける）
+  let desired = 0;
+  if (steerDrag !== null) desired = Math.max(-steerMax, Math.min(steerMax, (pTarget - px) * 5));
+  else if (keys.left) desired = -steerMax;
+  else if (keys.right) desired = steerMax;
+  const hasInput = steerDrag !== null || keys.left || keys.right;
+  // 入力中はキビキビ追従、離すと摩擦でゆっくり減速＝惰性で滑り続ける（惰性走行距離はこの 1.5 が決める）
+  pvx += (desired - pvx) * Math.min(1, dt * (hasInput ? 6 : 1.5));
   // カーブ：遠心力で車体が外側へ流れる
   curveTimer -= dt;
   if (curveTimer <= 0) {
@@ -212,12 +205,9 @@ function update(dt) {
     curveTimer = 5 + Math.random() * 4;
   }
   curveCur += (curveTarget - curveCur) * Math.min(1, dt * 0.8);
-  // 遠心力：目標位置ごと流すので、触っていなくても・指を止めていても外側へ流れ続ける
-  let drift = curveCur * (0.26 + 0.40 * ratio);
-  const gripping = curveCur !== 0 && Math.abs(inputVelSm) > 0.4 && Math.sign(inputVelSm) === Math.sign(curveCur);
-  if (gripping) drift *= 0.55;   // カーブ内側へ積極的に切っている間だけグリップ
-  pTarget -= drift * dt;
-  px -= drift * dt;
+  // 遠心力：横速度への「加速度」として効く。カーブ中ずっと溜まり続け、抜けた後も惰性で残る
+  pvx -= curveCur * (0.6 + 1.6 * ratio * ratio) * dt;
+  px += pvx * dt;
   px = Math.max(-1.35, Math.min(1.35, px));
   isOff = Math.abs(px) > 1.0;   // 道路（|px|<=1）をはみ出したか
   // 車体の傾き：横移動の勢いから目標リーン角を作って滑らかに追う
