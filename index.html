@@ -78,6 +78,7 @@ let fuel = 100;
 let fuels = [];                 // {t, lane}
 let spawnTimer = 0, warnTimer = 0, elapsed = 0, sputterT = 0;
 let dmg = 0, overReason = null, boomT0 = 0, isOff = false;   // 水缶ダメージ／終了理由／道外判定
+let pull = 0, inputVelSm = 0;                                 // 惰性の引っ張り（ステアと反対方向へ溜まる）
 let themeIdx = 0, themeSeg = 0, nextThemeAt = 3000;          // 背景エリア
 let bannerT = 0, bannerTxt = '';
 const THEMES = [
@@ -118,6 +119,7 @@ function reset() {
   fuels = []; spawnTimer = 0.6; warnTimer = 0; elapsed = 0; sputterT = 0;
   curveCur = 0; curveTarget = 0; curveTimer = 4;
   dmg = 0; overReason = null; isOff = false;
+  pull = 0; inputVelSm = 0;
   themeIdx = 0; themeSeg = 0; nextThemeAt = 3000; bannerT = 0;
 }
 
@@ -182,6 +184,7 @@ function update(dt) {
     sndArea();
   }
   // ステアリング（速いほど少しキビキビ）
+  const ptBefore = pTarget;
   const steerSpeed = 2.9 + ratio * 1.5;
   if (keys.left) pTarget -= steerSpeed * dt;
   if (keys.right) pTarget += steerSpeed * dt;
@@ -191,6 +194,14 @@ function update(dt) {
     pTarget = Math.max(-1.35, Math.min(1.35, (steerDrag - centerX(0.92)) / half));
   }
   pTarget = Math.max(-1.35, Math.min(1.35, pTarget));
+  // 惰性の引っ張り：ステアした反対方向へ力が溜まり、指を止めても／離しても しばらく引っ張り続ける
+  const inputVel = Math.max(-7, Math.min(7, (pTarget - ptBefore) / Math.max(dt, 0.001)));
+  inputVelSm += (inputVel - inputVelSm) * Math.min(1, dt * 10);
+  pull -= inputVelSm * 0.85 * dt;
+  pull = Math.max(-1.0, Math.min(1.0, pull));
+  pull *= Math.pow(0.46, dt);
+  pTarget += pull * dt;
+  px += pull * dt;
   // 指で押さえている間は追従を強くして「指に吸い付く」感じに
   px += (pTarget - px) * Math.min(1, dt * (steerDrag !== null ? 16 : 11));
   // カーブ：遠心力で車体が外側へ流れる
